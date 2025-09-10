@@ -1,103 +1,89 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>Random Chat (Text + Video)</title>
+  <title>Random Chat</title>
   <style>
-    body { font-family: Arial, sans-serif; text-align: center; margin: 20px; }
-    #videos { display: flex; gap: 10px; justify-content: center; margin-top: 10px; }
-    video { width: 320px; height: 240px; background: black; border-radius: 8px; }
-    #chatBox { border: 1px solid #ccc; width: 400px; height: 200px; margin: 10px auto; overflow-y: auto; padding: 5px; text-align:left; }
-    #chatInput { width: 300px; }
+    body { font-family: Arial, sans-serif; }
+    #videos { display: flex; gap: 10px; margin-top: 10px; }
+    video { width: 300px; height: 220px; background: black; }
+    #chatBox { border: 1px solid #ccc; height: 200px; overflow-y: auto; margin-top: 10px; padding: 5px; }
   </style>
 </head>
 <body>
   <h2>Random Chat</h2>
-  <button id="startVideo">Start Video Chat</button>
   <button id="startText">Start Text Chat</button>
+  <button id="startVideo">Start Video Chat</button>
   <button id="nextBtn" disabled>Next</button>
-  <div id="status"></div>
 
-  <div id="videoSection" style="display:none;">
-    <div id="videos">
-      <video id="localVideo" autoplay muted playsinline></video>
-      <video id="remoteVideo" autoplay playsinline></video>
-    </div>
+  <div id="videos">
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
   </div>
 
-  <div id="textSection" style="display:none;">
-    <div id="chatBox"></div>
-    <input id="chatInput" placeholder="Type message...">
-    <button id="sendBtn">Send</button>
-  </div>
+  <div id="chatBox"></div>
+  <input id="msgInput" placeholder="Type message..." />
+  <button id="sendBtn">Send</button>
 
   <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io();
-    const statusEl = document.getElementById('status');
+    const startText = document.getElementById("startText");
+    const startVideo = document.getElementById("startVideo");
+    const nextBtn = document.getElementById("nextBtn");
+    const chatBox = document.getElementById("chatBox");
+    const msgInput = document.getElementById("msgInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
 
-    let mode = null;
-    let room = null;
     let partnerId = null;
+    let room = null;
+    let mode = null;
     let pc = null;
-    let localStream = null;
 
-    // DOM
-    const startVideoBtn = document.getElementById('startVideo');
-    const startTextBtn = document.getElementById('startText');
-    const nextBtn = document.getElementById('nextBtn');
-    const videoSection = document.getElementById('videoSection');
-    const textSection = document.getElementById('textSection');
-    const localVideo = document.getElementById('localVideo');
-    const remoteVideo = document.getElementById('remoteVideo');
-    const chatBox = document.getElementById('chatBox');
-    const chatInput = document.getElementById('chatInput');
-    const sendBtn = document.getElementById('sendBtn');
-
-    function logStatus(msg) { statusEl.textContent = msg; }
-
-    // --- EVENTS ---
-    startVideoBtn.onclick = async () => {
-      mode = "video";
-      videoSection.style.display = "block";
-      textSection.style.display = "none";
-      await startMedia();
-      socket.emit("join", "video");
-      logStatus("Looking for a video partner...");
-    };
-
-    startTextBtn.onclick = () => {
-      mode = "text";
-      videoSection.style.display = "none";
-      textSection.style.display = "block";
+    // --- JOIN ---
+    startText.onclick = () => {
       socket.emit("join", "text");
-      logStatus("Looking for a text partner...");
+      mode = "text";
+      clearChat();
+      logStatus("Searching for text partner...");
     };
 
+    startVideo.onclick = () => {
+      socket.emit("join", "video");
+      mode = "video";
+      clearChat();
+      logStatus("Searching for video partner...");
+    };
+
+    // --- NEXT ---
     nextBtn.onclick = () => {
       cleanup();
-      clearChat();   // ✅ clear old messages
+      clearChat();
       socket.emit("next");
       logStatus("Searching again...");
       nextBtn.disabled = true;
     };
 
+    // --- SEND CHAT ---
     sendBtn.onclick = () => {
-      const msg = chatInput.value;
-      if (msg && room) {
-        appendMsg("You", msg);
-        socket.emit("chat", { room, message: msg });
-        chatInput.value = "";
-      }
+      if (!room) return;
+      const msg = msgInput.value;
+      if (!msg) return;
+      socket.emit("chat", { room, message: msg });
+      addMessage("You: " + msg);
+      msgInput.value = "";
     };
 
-    // --- Socket Handlers ---
-    socket.on("waiting", () => logStatus("Waiting for partner..."));
+    // --- SOCKET EVENTS ---
+    socket.on("waiting", () => {
+      logStatus("Waiting for partner...");
+    });
 
     socket.on("paired", async ({ partnerId: pid, mode: m, room: r }) => {
       partnerId = pid;
       mode = m;
-      room = r;   // ✅ use server’s room
+      room = r;
       logStatus("Paired! Say hello!");
       nextBtn.disabled = false;
 
@@ -109,64 +95,78 @@
       }
     });
 
-    socket.on("partner-left", () => {
-      logStatus("Partner left. Press Next to continue.");
-      cleanup();
-      clearChat();   // ✅ clear old messages
-    });
-
     socket.on("chat", ({ from, message }) => {
-      appendMsg("Stranger", message);
+      if (from === socket.id) return;
+      addMessage("Stranger: " + message);
     });
 
-    // --- VIDEO SIGNALING ---
     socket.on("signal", async ({ from, data }) => {
+      if (!pc) setupPeer();
       if (data.type === "offer") {
-        setupPeer();
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit("signal", { to: from, data: { type: "answer", sdp: answer } });
       } else if (data.type === "answer") {
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-      } else if (data.type === "ice") {
+      } else if (data.type === "candidate") {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-        } catch (err) { console.error(err); }
+        } catch (err) {
+          console.error("Error adding candidate", err);
+        }
       }
     });
 
-    // --- Helper Functions ---
-    async function startMedia() {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = localStream;
-    }
+    socket.on("partner-left", () => {
+      logStatus("Partner left. Press Next to continue.");
+      cleanup();
+      clearChat();
+    });
 
+    // --- FUNCTIONS ---
     function setupPeer() {
-      pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-      pc.onicecandidate = e => {
-        if (e.candidate) socket.emit("signal", { to: partnerId, data: { type: "ice", candidate: e.candidate } });
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit("signal", { to: partnerId, data: { type: "candidate", candidate: event.candidate } });
+        }
       };
-      pc.ontrack = e => remoteVideo.srcObject = e.streams[0];
+
+      pc.ontrack = (event) => {
+        remoteVideo.srcObject = event.streams[0];
+      };
+
+      navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((stream) => {
+        localVideo.srcObject = stream;
+        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      });
     }
 
-    function cleanup() {
-      if (pc) pc.close();
-      pc = null;
-      partnerId = null;
-      remoteVideo.srcObject = null;
+    function addMessage(msg) {
+      chatBox.innerHTML += msg + "<br/>";
+      chatBox.scrollTop = chatBox.scrollHeight;
     }
 
-    function appendMsg(sender, msg) {
-      const div = document.createElement("div");
-      div.textContent = sender + ": " + msg;
-      chatBox.appendChild(div);
+    function logStatus(msg) {
+      chatBox.innerHTML += "<i>" + msg + "</i><br/>";
       chatBox.scrollTop = chatBox.scrollHeight;
     }
 
     function clearChat() {
       chatBox.innerHTML = "";
+    }
+
+    function cleanup() {
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      remoteVideo.srcObject = null;
+      localVideo.srcObject = null;
     }
   </script>
 </body>
